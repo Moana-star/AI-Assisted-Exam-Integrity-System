@@ -2,7 +2,7 @@
 
 An academic learning prototype for examination identity verification, attendance management, and invigilator review.
 
-> **Project status:** Initial repository scaffold. Application features are not implemented yet.
+> **Project status:** Working academic prototype. Core authentication, role guards, records, enrollment UI, attendance rules, dashboards, and tests are implemented. Hardware fingerprint integration and production-grade facial recognition remain future adapters.
 
 ## Technology stack
 
@@ -78,9 +78,32 @@ No React, Node.js, Bootstrap, or frontend framework is part of the planned core 
 
 Agree on model fields, URL names, request/response formats, permissions, and integration milestones before connecting modules. Coordinate changes to shared configuration and base templates.
 
-## Development setup (to be completed in the implementation phase)
+## Development setup
 
-The repository currently contains the planned structure and documentation, not a runnable Django application. Once the project setup phase begins, create a virtual environment, install dependencies from `requirements.txt`, create the Django project in this repository, configure settings, and run migrations.
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py runserver
+```
+
+Open `http://127.0.0.1:8000/`. The custom user model supports `admin`, `invigilator`, and `student` roles. Never place a password in source control.
+
+Run validation with:
+
+```powershell
+python manage.py check
+python manage.py test
+```
+
+## Prototype biometric limitations
+
+The fingerprint workflow is deliberately a backend-controlled simulation and is labelled as such in the interface; a browser cannot read an arbitrary USB scanner. The face adapter validates images, detects one face with OpenCV, and compares a normalized face crop. This is an educational adapter, not a certified biometric identification system: it does not provide reliable liveness detection, anti-spoofing, or forensic identity proof. Mismatches and inconclusive results always remain manual-review cases.
+
+The application should be used only with consenting volunteers and synthetic records. Keep `.env`, local databases, uploads, and biometric templates out of public repositories. Production deployment requires key management, encrypted template storage, retention/deletion controls, consent records, TLS, rate limiting, and an independently evaluated recognition model.
 
 ## Verification outcome policy
 
