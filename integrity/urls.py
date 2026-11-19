@@ -9,4 +9,10 @@ urlpatterns = [
     path('examinations/', views.examinations, name='examinations'), path('examinations/add/', views.examination_add, name='examination_add'),
     path('biometrics/enroll/', views.enrollment, name='enrollment'), path('biometrics/verify/', views.verification, name='verification'),
     path('attendance/', views.attendance, name='attendance'), path('reports/', views.reports, name='reports'),
+    path('api/notifications/', views.notifications_api, name='notifications_api'),
+    path('api/notifications/<int:notification_id>/read/', views.notification_mark_read, name='notification_mark_read'),
+    path('api/monitoring/events/', views.monitoring_event_create, name='monitoring_event_create'),
+    path('api/examination-access/check/', views.examination_access_check, name='examination_access_check'),
+    path('api/incidents/', views.incident_create, name='incident_create'),
+    path('operations/', views.operations, name='operations'),
 ]

@@ -1,7 +1,9 @@
 from datetime import date, time
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from integrity.models import Attendance, Examination, Student
+from django.db import IntegrityError, transaction
+from django.utils import timezone
+from integrity.models import Attendance, Examination, ExaminationRoom, Notification, Seat, SeatAssignment, Student
 from integrity.services.verification_service import combine
 from integrity.services.attendance_service import record
 
@@ -45,3 +47,30 @@ class IntegrityCoreTests(TestCase):
         self.assertRedirects(response, '/accounts/pending/')
         pending.refresh_from_db()
         self.assertTrue(pending.is_active)
+
+    def test_seat_assignment_prevents_duplicate_seat_and_student(self):
+        room = ExaminationRoom.objects.create(name='Hall B', capacity=2)
+        seat = Seat.objects.create(room=room, number='B1')
+        SeatAssignment.objects.create(examination=self.exam, seat=seat, student=self.student)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SeatAssignment.objects.create(examination=self.exam, seat=seat, student=self.student)
+
+        other_user = get_user_model().objects.create_user(username='student-two', password='test-pass-123')
+        other_student = Student.objects.create(user=other_user, admission_number='A002', full_name='Second Student', course='BSc', department='Computing')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SeatAssignment.objects.create(examination=self.exam, seat=seat, student=other_student)
+
+    def test_seat_numbers_are_unique_within_a_room(self):
+        room = ExaminationRoom.objects.create(name='Hall C', capacity=1)
+        Seat.objects.create(room=room, number='C1')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Seat.objects.create(room=room, number='C1')
+
+    def test_notification_supports_unread_and_read_state(self):
+        notification = Notification.objects.create(examination=self.exam, student=self.student, category=Notification.Category.MONITORING, priority=Notification.Priority.HIGH, title='Review required', message='A detection needs human review.')
+        self.assertFalse(notification.is_read)
+        notification.read_at = timezone.now()
+        notification.save(update_fields=['read_at'])
+        notification.refresh_from_db()
+        self.assertTrue(notification.is_read)

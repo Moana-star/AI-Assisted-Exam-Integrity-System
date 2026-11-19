@@ -1,12 +1,14 @@
 import base64
+import json
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.http import JsonResponse, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import ExaminationForm, RegistrationForm, StudentForm
-from .models import Attendance, AuditLog, BiometricProfile, Examination, ManualReview, Student, VerificationLog
+from .models import Attendance, AuditLog, BiometricProfile, Examination, ExaminationRegistration, ExaminationRoom, Incident, ManualReview, MonitoringEvent, Notification, SeatAssignment, Student, VerificationLog
 from .permissions import role_required
 from .services.fingerprint_service import enroll as enroll_fingerprint
 from .services.face_service import enroll as enroll_face
@@ -40,7 +42,9 @@ def approve_account(request, user_id):
 
 @login_required
 def dashboard(request):
-    context = {'students_count': Student.objects.count(), 'exams_count': Examination.objects.count(), 'verified_count': Attendance.objects.filter(attendance_status='present').count(), 'reviews_count': ManualReview.objects.filter(decision='pending').count(), 'upcoming': Examination.objects.filter(examination_date__gte=timezone.localdate()).order_by('examination_date')[:5], 'recent_logs': VerificationLog.objects.select_related('student','examination').order_by('-timestamp')[:6]}
+    notifications = Notification.objects.filter(recipient__isnull=True)
+    if hasattr(request.user, 'invigilator_profile'): notifications = notifications | Notification.objects.filter(recipient=request.user.invigilator_profile)
+    context = {'students_count': Student.objects.count(), 'exams_count': Examination.objects.count(), 'verified_count': Attendance.objects.filter(attendance_status='present').count(), 'reviews_count': ManualReview.objects.filter(decision='pending').count(), 'upcoming': Examination.objects.filter(examination_date__gte=timezone.localdate()).order_by('examination_date')[:5], 'recent_logs': VerificationLog.objects.select_related('student','examination').order_by('-timestamp')[:6], 'notifications': notifications.order_by('-created_at')[:6]}
     if request.user.role == 'student': return render(request, 'dashboard/student_dashboard.html', context)
     if request.user.role == 'invigilator': return render(request, 'dashboard/invigilator_dashboard.html', context)
     return render(request, 'dashboard/admin_dashboard.html', context)
@@ -84,3 +88,66 @@ def attendance(request): return render(request, 'attendance/attendance_list.html
 
 @role_required('admin','invigilator')
 def reports(request): return render(request, 'reports/reports_dashboard.html', {'total': Attendance.objects.count(), 'present': Attendance.objects.filter(attendance_status='present').count(), 'reviews': ManualReview.objects.filter(decision='pending').count()})
+
+@role_required('admin', 'invigilator')
+def notifications_api(request):
+    qs = Notification.objects.select_related('examination', 'student').filter(recipient__isnull=True) | Notification.objects.select_related('examination', 'student').filter(recipient__user=request.user)
+    unread_only = request.GET.get('unread') == '1'
+    if unread_only: qs = qs.filter(read_at__isnull=True)
+    data = [{'id': n.id, 'title': n.title, 'message': n.message, 'category': n.category, 'priority': n.priority, 'read': n.is_read, 'created_at': n.created_at.isoformat()} for n in qs.order_by('-created_at')[:50]]
+    return JsonResponse({'notifications': data})
+
+@role_required('admin', 'invigilator')
+def notification_mark_read(request, notification_id):
+    notification = get_object_or_404(Notification, pk=notification_id)
+    if notification.recipient and notification.recipient.user_id != request.user.id and request.user.role != 'admin':
+        return JsonResponse({'error': 'Not allowed.'}, status=403)
+    if request.method != 'POST': return JsonResponse({'error': 'POST required.'}, status=405)
+    notification.read_at = timezone.now(); notification.save(update_fields=['read_at'])
+    return JsonResponse({'id': notification.id, 'read': True})
+
+@role_required('admin', 'invigilator')
+def monitoring_event_create(request):
+    if request.method != 'POST': return JsonResponse({'error': 'POST required.'}, status=405)
+    try: payload = json.loads(request.body or '{}')
+    except json.JSONDecodeError: return JsonResponse({'error': 'Invalid JSON.'}, status=400)
+    examination = get_object_or_404(Examination, pk=payload.get('examination_id'))
+    event = MonitoringEvent.objects.create(examination=examination, student_id=payload.get('student_id') or None, event_type=payload.get('event_type', MonitoringEvent.EventType.OBJECT_DETECTED), detected_class=payload.get('detected_class', ''), confidence=payload.get('confidence'), metadata=payload.get('metadata', {}))
+    Notification.objects.create(examination=examination, student=event.student, category=Notification.Category.MONITORING, priority=Notification.Priority.HIGH, title='Monitoring event requires review', message=f'{event.get_event_type_display()}: {event.detected_class or "observable event"}.')
+    return JsonResponse({'id': event.id, 'review_required': True}, status=201)
+
+@role_required('admin', 'invigilator')
+def examination_access_check(request):
+    if request.method != 'POST': return JsonResponse({'error': 'POST required.'}, status=405)
+    try: payload = json.loads(request.body or '{}')
+    except json.JSONDecodeError: return JsonResponse({'error': 'Invalid JSON.'}, status=400)
+    examination = get_object_or_404(Examination, pk=payload.get('examination_id'))
+    student = get_object_or_404(Student, pk=payload.get('student_id'))
+    registered = ExaminationRegistration.objects.filter(examination=examination, student=student).exists()
+    assignment = SeatAssignment.objects.filter(examination=examination, student=student).select_related('seat').first()
+    allowed = registered and assignment is not None
+    if not allowed:
+        Notification.objects.create(examination=examination, student=student, category=Notification.Category.ACCESS, priority=Notification.Priority.HIGH, title='Examination access requires review', message='The candidate is not registered or has no assigned seat.')
+    return JsonResponse({'allowed': allowed, 'registered': registered, 'seat': assignment.seat.number if assignment else None, 'review_required': not allowed})
+
+@role_required('admin', 'invigilator')
+def incident_create(request):
+    if request.method != 'POST': return JsonResponse({'error': 'POST required.'}, status=405)
+    try: payload = json.loads(request.body or '{}')
+    except json.JSONDecodeError: return JsonResponse({'error': 'Invalid JSON.'}, status=400)
+    examination = get_object_or_404(Examination, pk=payload.get('examination_id'))
+    invigilator = getattr(request.user, 'invigilator_profile', None)
+    incident = Incident.objects.create(examination=examination, student_id=payload.get('student_id') or None, reported_by=invigilator, title=payload.get('title', 'Manual review required'), description=payload.get('description', ''))
+    return JsonResponse({'id': incident.id, 'status': incident.status}, status=201)
+
+@role_required('admin', 'invigilator')
+def operations(request):
+    notifications = Notification.objects.filter(recipient__isnull=True)
+    if hasattr(request.user, 'invigilator_profile'): notifications = notifications | Notification.objects.filter(recipient=request.user.invigilator_profile)
+    return render(request, 'monitoring/operations.html', {
+        'notifications': notifications.order_by('-created_at')[:20],
+        'events': MonitoringEvent.objects.select_related('examination', 'student')[:30],
+        'incidents': Incident.objects.select_related('examination', 'student')[:20],
+        'rooms': ExaminationRoom.objects.prefetch_related('seats')[:20],
+        'examinations': Examination.objects.filter(status__in=['active', 'upcoming'])[:20],
+    })
