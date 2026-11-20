@@ -1,10 +1,12 @@
 import base64
+import csv
 import json
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.http import JsonResponse, HttpResponse
+from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import ExaminationForm, RegistrationForm, StudentForm
@@ -12,8 +14,13 @@ from .models import Attendance, AuditLog, BiometricProfile, Examination, Examina
 from .permissions import role_required
 from .services.fingerprint_service import enroll as enroll_fingerprint
 from .services.face_service import enroll as enroll_face
+from .services.verification_service import verify as verify_biometrics
 
 User = get_user_model()
+
+def login_entry(request):
+    """Always start at the login screen when the site root is opened."""
+    return redirect('login')
 
 def register(request):
     if request.user.is_authenticated: return redirect('dashboard')
@@ -76,18 +83,43 @@ def enrollment(request):
         try: face_bytes = base64.b64decode(request.POST.get('face_data','').split(',',1)[-1])
         except Exception: face_bytes = b''
         template, face = enroll_face(face_bytes)
-        if template: profile.facial_template = template
+        if template:
+            profile.facial_template = template
+            profile.facial_capture.save(f'{student.admission_number}_capture.jpg', ContentFile(face_bytes), save=False)
         profile.enrollment_status = 'enrolled' if template else 'fingerprint_only'; profile.enrollment_date = timezone.now(); profile.save(); messages.success(request, f'Enrollment saved. {fp.message} {face.message}')
     return render(request, 'biometrics/enrollment.html', {'student': student, 'profile': getattr(student, 'biometric_profile', None)})
 
 @role_required('admin','invigilator')
-def verification(request): return render(request, 'biometrics/verification.html', {'examinations': Examination.objects.filter(status='active'), 'students': Student.objects.all()})
+def verification(request):
+    result = None
+    if request.method == 'POST':
+        examination = get_object_or_404(Examination, pk=request.POST.get('examination_id'), status='active')
+        student = get_object_or_404(Student, pk=request.POST.get('student_id'))
+        profile = BiometricProfile.objects.filter(student=student).first()
+        try: face_bytes = base64.b64decode(request.POST.get('face_data', '').split(',', 1)[-1])
+        except Exception: face_bytes = b''
+        result = verify_biometrics(profile, profile.facial_template if profile else '', face_bytes)
+        VerificationLog.objects.create(student=student, examination=examination, fingerprint_result=result['fingerprint_result'], facial_result=result['facial_result'], overall_result=result['overall_result'], reviewing_invigilator=getattr(request.user, 'invigilator_profile', None))
+        if result['overall_result'] != 'verified':
+            Notification.objects.create(examination=examination, student=student, category=Notification.Category.VERIFICATION, priority=Notification.Priority.HIGH, title='Biometric verification requires review', message=f"Fingerprint: {result['fingerprint_result']}; face: {result['facial_result']}.")
+        else:
+            messages.success(request, 'Candidate verified. Attendance may be recorded.')
+    return render(request, 'biometrics/verification.html', {'examinations': Examination.objects.filter(status='active'), 'students': Student.objects.all(), 'result': result})
 
 @role_required('admin','invigilator')
 def attendance(request): return render(request, 'attendance/attendance_list.html', {'records': Attendance.objects.select_related('student','examination').order_by('-verification_timestamp')})
 
 @role_required('admin','invigilator')
 def reports(request): return render(request, 'reports/reports_dashboard.html', {'total': Attendance.objects.count(), 'present': Attendance.objects.filter(attendance_status='present').count(), 'reviews': ManualReview.objects.filter(decision='pending').count()})
+
+@role_required('admin', 'invigilator')
+def attendance_export(request):
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="attendance-report.csv"'
+    writer = csv.writer(response); writer.writerow(['Admission number', 'Student', 'Examination', 'Status', 'Timestamp'])
+    for row in Attendance.objects.select_related('student', 'examination').order_by('-verification_timestamp'):
+        writer.writerow([row.student.admission_number, row.student.full_name, row.examination.code, row.attendance_status, row.verification_timestamp.isoformat()])
+    return response
 
 @role_required('admin', 'invigilator')
 def notifications_api(request):

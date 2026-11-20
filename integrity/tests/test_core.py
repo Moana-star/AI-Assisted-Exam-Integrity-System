@@ -31,6 +31,15 @@ class IntegrityCoreTests(TestCase):
         response = self.client.get('/students/')
         self.assertEqual(response.status_code, 403)
 
+    def test_logout_redirects_to_login_and_clears_session(self):
+        self.client.login(username='student', password='test-pass-123')
+        response = self.client.get('/')
+        self.assertEqual(response['Cache-Control'], 'no-store, no-cache, must-revalidate, max-age=0')
+        response = self.client.post('/logout/')
+        self.assertRedirects(response, '/login/')
+        response = self.client.get('/')
+        self.assertRedirects(response, '/login/')
+
     def test_registration_waits_for_admin_approval(self):
         response = self.client.post('/register/', {'username':'pending', 'email':'pending@example.com', 'password':'strong-pass-123', 'password_confirm':'strong-pass-123', 'admission_number':'A002', 'full_name':'Pending Student', 'course':'BSc', 'department':'Computing'})
         self.assertEqual(response.status_code, 200)
