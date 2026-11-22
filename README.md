@@ -130,3 +130,84 @@ Biometric information is highly sensitive. Before implementing enrollment, defin
 - Document API contracts before frontend/backend integration.
 
 See [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md), [docs/API_CONTRACT.md](docs/API_CONTRACT.md), and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
+
+
+
+
+
+
+
+## How the project works
+
+This is a Django web app for managing exam access, identity checks, attendance, and incidents. Users sign in with one of three roles: **administrator**, **invigilator**, or **student**. The role controls which pages they can access.
+
+### 1. Student account creation and approval
+
+1. A student opens the sign-in page and selects **Request access**.
+2. On **Create your account**, they enter a username, email, password, admission number, name, course, and department.
+3. The app creates a student account that is **inactive** and saves the student’s profile. It checks that the username and admission number are not already in use and that the passwords match.
+4. The student sees a request-received page and must wait for approval.
+5. An administrator opens **Account approvals** and approves the request. The app activates the account and records an audit entry.
+6. The student can then sign in and reach their dashboard.
+
+These steps are implemented in the registration form and views: [forms.py](integrity/forms.py) and [views.py](integrity/views.py).
+
+**Administrator-created student accounts work differently:** the Students page lets an administrator create a student account with a temporary password. That path does not use the same inactive-account approval flow. The public registration form creates student accounts; it does not create invigilator accounts.
+
+### 2. Sign-in and navigation
+
+The site root redirects to **Sign in**. Django checks the credentials, and inactive accounts cannot sign in. Once signed in, users see navigation links based on their role. Page access is also checked on the server, so hiding a link alone is not the security control.
+
+The shared navigation and sign-out form are in [base.html](templates/base.html). The route list is in [urls.py](integrity/urls.py).
+
+## What each page does
+
+| Page | Who can use it | Purpose |
+|---|---|---|
+| **Sign in** | Everyone | Sign in to an active account. Links to student access requests. |
+| **Create your account** | Prospective students | Submit a student account request for administrator approval. |
+| **Request received** | New student registrants | Confirms the request is awaiting approval. |
+| **Overview / dashboard** | All signed-in users | Shows a role-specific landing page. Admins see counts, notifications, and upcoming exams; students see attendance and upcoming-exam counts plus an enrollment link. |
+| **Account approvals** | Administrator | List pending student/invigilator accounts and approve them. The public registration page itself only creates student requests. |
+| **Students** | Administrator | List student records and open the student registration form. |
+| **Register student** | Administrator | Create a student record, including a username and temporary password. |
+| **Examinations** | Administrator | List exams with code, title, date, venue, and status. |
+| **Create examination** | Administrator | Add an exam with its schedule, course, venue, and status. |
+| **Biometric enrollment** | Student or administrator | Enroll a student’s simulated fingerprint reference and capture a face image using the camera. |
+| **Verification desk** | Administrator or invigilator | Select an active exam and student, capture a face image, and run the server-side biometric checks. |
+| **Operations desk** | Administrator or invigilator | Review notifications and monitoring events, view room/seat information, and submit incidents for human follow-up. |
+| **Attendance** | Administrator or invigilator | View recorded attendance entries. |
+| **Reports** | Administrator or invigilator | View attendance totals and pending-review count; download attendance as CSV. |
+| **Django Admin** | Staff with Django admin access | Manage underlying records such as rooms, seats, registrations, and other models. It is available at `/admin/`. |
+
+The page templates are under [templates/](templates), and the page behavior is mainly handled by [views.py](integrity/views.py).
+
+## Examination-day flow
+
+1. An administrator creates an examination and manages student, room, seat, and exam-registration records.
+2. A student enrolls their biometrics. The enrollment page requests camera access for the face capture.
+3. An invigilator opens the Verification desk, selects the active exam and candidate, captures a face image, and submits it.
+4. Django runs the fingerprint and face checks and saves a verification log.
+5. A result of **verified** displays a success message. Any other result creates a notification requiring review.
+6. An invigilator can review notifications and submit an incident from the Operations desk.
+
+The intended system policy is that uncertain or mismatched biometric results lead to human review, not an automatic misconduct finding. The project’s overview of this policy is in [README.md](README.md) and [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Current prototype limitations to know
+
+- Fingerprint enrollment and checking are **simulated**; the browser does not read a USB fingerprint scanner.
+- The face feature detects a face and compares a simple image-derived representation. It is an educational prototype, not production-grade identity recognition or liveness detection.
+- The verification view writes a verification log, but in the current implementation it does **not** call the attendance-recording service. So a successful verification does not automatically create an attendance row.
+- The access-check and monitoring-event endpoints exist, but the Operations page does not currently provide a full live monitoring or exam-entry workflow.
+- Room and seat data are viewed on Operations, with a note to create rooms in Django Admin.
+- The Reports page is a small summary plus CSV export; it is not a full analytics dashboard.
+- Enrollment and verification depend on the browser allowing camera access.
+
+The project describes itself as a working academic prototype, with hardware fingerprint integration and production-grade facial recognition still future work, in [README.md](README.md).
+
+
+
+
+
+
+
